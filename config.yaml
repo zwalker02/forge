@@ -5,6 +5,6 @@ recipients:
   bcc: []
 
 email:
-  subject_prefix: "[Weekly Finance Brief]"
-  from_name: "Finance Brief Bot"
+  subject_prefix: "[Forge Financials]"
+  from_name: "Forge Financial Bot"
   reply_to: "zwalker@ucpm.com"
