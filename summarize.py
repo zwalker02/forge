@@ -392,7 +392,7 @@ def summarize_sections(collected: List[Dict[str, Any]]) -> Dict[str, List[Dict[s
                 "url": it.get("url", "#"),
                 "summary": js["summary"],
                 "why": js["why"],
-                "published": it.get("published").strftime("%Y-%m-%d") if it.get("published") else ""
+                "published": it.get("published").strftime("%B %d, %Y") if it.get("published") else ""
             })
 
     return results
