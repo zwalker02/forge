@@ -3,25 +3,36 @@ from datetime import datetime, timedelta
 from dateutil import tz
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from typing import List, Dict, Any
+from urllib.parse import urlparse
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 TZ = tz.gettz("America/Phoenix")
 
-# ---------- Load config & sources ----------
+# ---------------------- Load config & sources ----------------------
 with open(os.path.join(BASE, "config.yaml"), "r", encoding="utf-8") as f:
     CONFIG = yaml.safe_load(f)
 
 with open(os.path.join(BASE, "sources.yaml"), "r", encoding="utf-8") as f:
     SOURCES = yaml.safe_load(f)
 
-# ---------- Relevance + Bucketing Keywords ----------
+def _cfg(key, default=None):
+    node = CONFIG.get("filters", {})
+    return node.get(key, default) if isinstance(node, dict) else default
+
+# Filters from config
+MIN_REL = int(_cfg("min_relevance", 2))
+NEG_TERMS = [t.lower() for t in _cfg("negative_terms", [])]
+PATH_DROPS = [t.lower() for t in _cfg("drop_if_url_path_contains", [])]
+ALLOWED_SOURCES = set(_cfg("allowed_sources", []) or [])
+
+# ---------------------- Finance keywords & regex -------------------
 FINANCE_TERMS = [
     # macro/markets
     "inflation","cpi","ppi","gdp","payrolls","unemployment","retail sales","fomc","federal reserve",
-    "interest rate","rates","yield","treasury","bond","mortgage","housing starts",
+    "interest rate","rates","yield","treasury","bond","mortgage","housing starts","housing market",
     "stocks","equities","index","s&p","nasdaq","dow","rally","selloff","volatility","vix",
     "oil","brent","wti","gasoline","gold","silver","copper","bitcoin","crypto","fx","currency","dollar",
-    # company / corporate
+    # company/corporate
     "earnings","results","eps","revenue","guidance","outlook","profit","loss","margin",
     "filing","10-k","10-q","8-k","sec","merger","acquisition","m&a","buyback","dividend","layoffs","spinoff","ipo"
 ]
@@ -30,6 +41,7 @@ FIN_RX = re.compile("|".join([re.escape(t) for t in FINANCE_TERMS]), re.I)
 MACRO_KEYS = ["federal reserve","fomc","bureau of labor","bls","bureau of economic","bea",
               "cpi","inflation","gdp","unemployment","payrolls","retail sales","ppi",
               "mortgage","treasury","bond","yield"]
+
 COMPANY_KEYS = [
     r"\bearnings?\b", r"\bresults?\b", r"\bEPS\b", r"\brevenue\b", r"\bguidance\b",
     r"\boutlook\b", r"\bprofit\b", r"\bloss\b", r"\b10-K\b", r"\b10-Q\b", r"\b8-K\b",
@@ -38,17 +50,17 @@ COMPANY_KEYS = [
 ]
 COMPANY_RX = re.compile("|".join(COMPANY_KEYS), re.I)
 
-# ---------- OpenAI ----------
+# ---------------------- OpenAI ----------------------
 def llm_json(title: str, snippet: str, max_tokens=260) -> Dict[str, str]:
-    """Ask the model for JSON: {'summary': '...', 'why': '...'} with 2–3 sentence WHY."""
+    """Return {'summary': 'two sentences', 'why': '2–3 sentences starting with Why it matters:'}."""
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
 
     system = open(os.path.join(BASE, "prompts", "system.txt"), encoding="utf-8").read()
-    user = f"Title: {title}\nSource snippet: {snippet}\nRespond with ONLY the JSON object."
+    base_user = f"Title: {title}\nSource snippet: {snippet}\nRespond with ONLY the JSON object."
 
-    def _ask(msg_user: str):
+    def _ask(msg_user: str) -> str:
         resp = requests.post(
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -66,19 +78,22 @@ def llm_json(title: str, snippet: str, max_tokens=260) -> Dict[str, str]:
         if resp.status_code >= 400:
             raise RuntimeError(f"OpenAI error {resp.status_code}: {resp.text[:300]}")
         text = resp.json()["choices"][0]["message"]["content"].strip()
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.S)
-        return text
+        return re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.S)
 
-    text = _ask(user)
+    # ask + parse
+    text = _ask(base_user)
     data = _coerce_json_with_fallback(text, snippet)
-    # Ensure WHY has >= 2 sentences; if not, force a rewrite once
+
+    # Ensure WHY has >=2 sentences; if not, one retry
     if len(re.findall(r"[.!?](?:\s|$)", data["why"])) < 2:
-        user2 = (f"{user}\n\nYour previous WHY was too short. "
+        user2 = (f"{base_user}\n\nYour previous WHY was too short. "
                  "Rewrite ONLY the JSON with a WHY that is 2–3 sentences beginning with 'Why it matters:'.")
         text2 = _ask(user2)
         data = _coerce_json_with_fallback(text2, snippet)
+
     if not data["why"].lower().startswith("why it matters:"):
         data["why"] = "Why it matters: " + data["why"].lstrip()
+
     return data
 
 def _coerce_json_with_fallback(text: str, snippet: str) -> Dict[str, str]:
@@ -89,7 +104,7 @@ def _coerce_json_with_fallback(text: str, snippet: str) -> Dict[str, str]:
             "why": str(parsed.get("why", "")).strip(),
         }
         if not out["summary"]:
-            out["summary"] = snippet[:300].strip()
+            out["summary"] = (snippet or "")[:300].strip()
         if not out["why"]:
             out["why"] = "Why it matters: see source for context."
         return out
@@ -98,10 +113,10 @@ def _coerce_json_with_fallback(text: str, snippet: str) -> Dict[str, str]:
         why = "Why it matters: " + m.group(1).strip() if m else "Why it matters: see source for context."
         if m:
             text = re.sub(r"(?i)why it matters\s*:\s*.+$", "", text).strip()
-        summary = text.strip() or snippet[:300].strip()
+        summary = text.strip() or (snippet or "")[:300].strip()
         return {"summary": summary, "why": why}
 
-# ---------- Fetch & prep ----------
+# ---------------------- Fetch & prep ----------------------
 def _clean_html(s: str) -> str:
     return re.sub(r"<.*?>", "", s or "").strip()
 
@@ -151,21 +166,44 @@ def rank_and_dedupe(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out.sort(key=lambda x: (x.get("published") or datetime.now(TZ)), reverse=True)
     return out
 
-# ---------- Finance relevance + Bucketing ----------
+# ---------------------- Finance relevance & bucketing ----------------------
 def finance_relevance(it: Dict[str, Any]) -> int:
-    """Return #matches of finance terms in title+summary; 0 means not finance-focused."""
     blob = f"{it.get('title','')} {it.get('summary','')}".lower()
     return len(FIN_RX.findall(blob))
 
 def looks_company(it: Dict[str, Any]) -> bool:
-    if it.get("type") == "sec":
+    if it.get("type") == "sec":  # any SEC item is company-specific
         return True
     blob = f"{it.get('title','')} {it.get('summary','')}"
     return COMPANY_RX.search(blob) is not None
 
+def is_finance_story(it: Dict[str, Any]) -> bool:
+    # Allowlist (optional)
+    src_name = (it.get("source") or "").strip()
+    if ALLOWED_SOURCES and src_name not in ALLOWED_SOURCES:
+        return False
+
+    rel = finance_relevance(it)
+    if rel >= MIN_REL:
+        return True  # clearly financial
+
+    # Hard-drop geopolitics/conflict when not clearly financial
+    text = f"{it.get('title','')} {it.get('summary','')}".lower()
+    if any(term in text for term in NEG_TERMS):
+        return False
+
+    # Drop world/geo paths when not clearly financial
+    try:
+        path = (urlparse(it.get('url') or '').path or '').lower()
+        if any(tok in path for tok in PATH_DROPS) and rel < 3:
+            return False
+    except Exception:
+        pass
+
+    return False
+
 def classify_item(it: Dict[str, Any]) -> str:
-    # filter out non-finance at the classifier level by requiring at least 1 finance term
-    if finance_relevance(it) == 0:
+    if not is_finance_story(it):
         return "drop"
     if looks_company(it):
         return "companies"
@@ -178,7 +216,7 @@ def bucket(items: List[Dict[str, Any]]) -> Dict[str, list]:
     b = {"macro": [], "markets": [], "companies": []}
     for it in items:
         cat = classify_item(it)
-        if cat == "drop":  # toss non-finance stories (e.g., geopolitics without a market angle)
+        if cat == "drop":  # toss non-finance stories
             continue
         b[cat].append(it)
     for k in b:
@@ -191,14 +229,14 @@ def backfill_companies(b: Dict[str, list], collected: List[Dict[str, Any]], per_
     have = {id(x) for x in b["companies"]}
     for it in collected:
         if id(it) in have: continue
-        if finance_relevance(it) == 0: continue
+        if not is_finance_story(it): continue
         if looks_company(it):
             b["companies"].append(it)
             have.add(id(it))
             if len(b["companies"]) >= per_section:
                 break
 
-# ---------- Summarize per-article ----------
+# ---------------------- Summarize per-article ----------------------
 def llm_json_safe(title: str, snippet: str) -> Dict[str, str]:
     try:
         return llm_json(title, snippet)
@@ -226,8 +264,7 @@ def summarize_sections(collected: List[Dict[str, Any]]) -> Dict[str, List[Dict[s
                 "why": js["why"],
                 "published": it.get("published").strftime("%Y-%m-%d") if it.get("published") else ""
             })
-        # If still empty (rare), synthesize a placeholder so the section isn't blank
-        if not results[sec]:
+        if not results[sec]:  # never empty
             results[sec].append({
                 "title": "No finance-focused items detected",
                 "url": "#",
@@ -237,7 +274,7 @@ def summarize_sections(collected: List[Dict[str, Any]]) -> Dict[str, List[Dict[s
             })
     return results
 
-# ---------- Render & email ----------
+# ---------------------- Render & email ----------------------
 def render_email(sections, sources, period_label):
     env = Environment(loader=FileSystemLoader(os.path.join(BASE, "templates")),
                       autoescape=select_autoescape())
@@ -300,7 +337,7 @@ def send_email(subject, html):
     with smtplib.SMTP(host, port) as s:
         s.starttls(); s.login(user, pwd); s.send_message(msg)
 
-# ---------- Main ----------
+# ---------------------- Main ----------------------
 def main():
     import argparse
     ap = argparse.ArgumentParser()
