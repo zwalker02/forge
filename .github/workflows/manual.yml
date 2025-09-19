@@ -54,15 +54,22 @@ jobs:
           SUBJECT_SUFFIX: ${{ inputs.subject_suffix }}
 
       - name: Build (preview only)
-        if: ${{ inputs.mode == 'preview' }}
-        run: python summarize.py --period ${{ inputs.period }}
-      - name: Upload preview artifact
-        if: ${{ inputs.mode == 'preview' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: finance-brief-preview
-          path: out/latest.html
-          if-no-files-found: error
+  if: ${{ inputs.mode == 'preview' }}
+  run: |
+    python summarize.py --period ${{ inputs.period }}
+    echo "---- List out dir ----"
+    ls -la out || true
+  env:
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}   # optional
+
+- name: Upload preview artifact
+  if: ${{ inputs.mode == 'preview' }}
+  uses: actions/upload-artifact@v4
+  with:
+    name: finance-brief-preview
+    path: out/latest.html
+    if-no-files-found: error
 
       - name: Apply send_to_self override (send only)
         if: ${{ inputs.mode == 'send' && inputs.send_to_self != '' }}
