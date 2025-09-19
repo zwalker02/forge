@@ -1,18 +1,37 @@
 rss:
-  - name: Federal Reserve Press Releases
-    url: https://www.federalreserve.gov/feeds/press_all.xml
-  - name: FOMC Monetary Policy
-    url: https://www.federalreserve.gov/feeds/press_monetary.xml
-  - name: Bureau of Labor Statistics
-    url: https://www.bls.gov/feeds/news.rss
-  - name: Bureau of Economic Analysis
-    url: https://www.bea.gov/rss.xml
   - name: WSJ Markets
     url: https://feeds.a.dj.com/rss/RSSMarketsMain.xml
-  - name: Reuters Company News
-    url: https://feeds.reuters.com/reuters/companyNews
-  - name: WSJ Business
-    url: https://feeds.a.dj.com/rss/RSSWorldNews.xml
+  - name: Reuters Business
+    url: https://feeds.reuters.com/reuters/businessNews
+  - name: CNBC Markets
+    url: https://www.cnbc.com/id/100003114/device/rss/rss.html
+  - name: SEC Current
+    url: https://www.sec.gov/cgi-bin/srch-edgar?text=*&first=20250101&last=20991231&output=atom    # keep if you like SEC firehose
 
 sec:
-  current_feed: https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&output=atom
+  current_feed: https://www.sec.gov/cgi-bin/srch-edgar?text=*&first=20250101&last=20991231&output=atom
+
+fallback:
+  markets_rss:
+    - name: Yahoo Finance - Market News
+      url: https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US
+    - name: Bloomberg Markets (Top Stories)
+      url: https://www.bloomberg.com/feeds/bpol/news.rss
+  companies_rss:
+    - name: Reuters Company News
+      url: https://feeds.reuters.com/reuters/companyNews
+    - name: WSJ Business
+      url: https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml
+
+# Optional: Fortune 500 tickers to probe with Finnhub (trim or extend)
+fortune500_tickers:
+  - AAPL
+  - MSFT
+  - AMZN
+  - NVDA
+  - GOOGL
+  - BRK.B
+  - JPM
+  - XOM
+  - META
+  - WMT
