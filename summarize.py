@@ -122,19 +122,18 @@ def _coerce_json_with_fallback(text: str, snippet: str) -> Dict[str, str]:
 def _clean_html(s: str) -> str:
     return re.sub(r"<.*?>", "", s or "").strip()
 
-def fetch_rss() -> List[Dict[str, Any]]:
+def fetch_rss_list(feed_specs: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     items = []
-    for src in SOURCES.get("rss", []):
+    for src in feed_specs or []:
         d = feedparser.parse(src["url"])
         for e in d.entries:
             when = None
-            # prefer published_parsed; some feeds only have updated_parsed
             if getattr(e, "published_parsed", None):
                 when = datetime(*e.published_parsed[:6], tzinfo=tz.tzutc()).astimezone(TZ)
             elif getattr(e, "updated_parsed", None):
                 when = datetime(*e.updated_parsed[:6], tzinfo=tz.tzutc()).astimezone(TZ)
             items.append({
-                "source": src["name"],
+                "source": src.get("name") or "RSS",
                 "url": getattr(e, "link", ""),
                 "title": getattr(e, "title", ""),
                 "summary": _clean_html(getattr(e, "summary", "")),
@@ -142,6 +141,9 @@ def fetch_rss() -> List[Dict[str, Any]]:
                 "type": "rss",
             })
     return items
+
+def fetch_rss() -> List[Dict[str, Any]]:
+    return fetch_rss_list(SOURCES.get("rss", []))
 
 def fetch_sec_current() -> List[Dict[str, Any]]:
     url = SOURCES.get("sec", {}).get("current_feed")
@@ -167,7 +169,7 @@ def fetch_sec_current() -> List[Dict[str, Any]]:
 def rank_and_dedupe(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen = set(); out = []
     for it in items:
-        key = (it.get("title","")[:160].lower(), it.get("source",""))
+        key = (it.get("title","")[:180].lower(), it.get("source",""))
         if key in seen: continue
         seen.add(key); out.append(it)
     out.sort(key=lambda x: (x.get("published") or datetime.now(TZ)), reverse=True)
@@ -184,14 +186,14 @@ def looks_company(it: Dict[str, Any]) -> bool:
     blob = f"{it.get('title','')} {it.get('summary','')}"
     return COMPANY_RX.search(blob) is not None
 
-def is_finance_story(it: Dict[str, Any]) -> bool:
+def is_finance_story(it: Dict[str, Any], min_rel: int = MIN_REL) -> bool:
     # Allowlist (optional)
     src_name = (it.get("source") or "").strip()
     if ALLOWED_SOURCES and src_name not in ALLOWED_SOURCES:
         return False
 
     rel = finance_relevance(it)
-    if rel >= MIN_REL:
+    if rel >= min_rel:
         return True  # clearly financial
 
     # Hard-drop geopolitics/conflict when not clearly financial
@@ -202,15 +204,15 @@ def is_finance_story(it: Dict[str, Any]) -> bool:
     # Drop world/geo paths when not clearly financial
     try:
         path = (urlparse(it.get('url') or '').path or '').lower()
-        if any(tok in path for tok in PATH_DROPS) and rel < 3:
+        if any(tok in path for tok in PATH_DROPS) and rel < max(3, min_rel + 1):
             return False
     except Exception:
         pass
 
     return False
 
-def classify_item(it: Dict[str, Any]) -> str:
-    if not is_finance_story(it):
+def classify_item(it: Dict[str, Any], min_rel: int = MIN_REL) -> str:
+    if not is_finance_story(it, min_rel=min_rel):
         return "drop"
     if looks_company(it):
         return "companies"
@@ -219,10 +221,10 @@ def classify_item(it: Dict[str, Any]) -> str:
         return "macro"
     return "markets"
 
-def bucket(items: List[Dict[str, Any]]) -> Dict[str, list]:
+def bucket(items: List[Dict[str, Any]], min_rel: int = MIN_REL) -> Dict[str, list]:
     b = {"macro": [], "markets": [], "companies": []}
     for it in items:
-        cat = classify_item(it)
+        cat = classify_item(it, min_rel=min_rel)
         if cat == "drop":  # toss non-finance stories
             continue
         b[cat].append(it)
@@ -230,13 +232,13 @@ def bucket(items: List[Dict[str, Any]]) -> Dict[str, list]:
         b[k].sort(key=lambda x: x.get("published") or datetime.now(TZ), reverse=True)
     return b
 
-def backfill_companies(b: Dict[str, list], collected: List[Dict[str, Any]], per_section: int):
+def backfill_companies(b: Dict[str, list], pool: List[Dict[str, Any]], per_section: int, min_rel: int):
     if len(b["companies"]) >= per_section:
         return
     have = {id(x) for x in b["companies"]}
-    for it in collected:
+    for it in pool:
         if id(it) in have: continue
-        if not is_finance_story(it): continue
+        if not is_finance_story(it, min_rel=min_rel): continue
         if looks_company(it):
             b["companies"].append(it)
             have.add(id(it))
@@ -251,10 +253,74 @@ def within_window(it: Dict[str, Any], days: int = WINDOW_DAYS) -> bool:
         return False
     now = datetime.now(TZ)
     cutoff = now - timedelta(days=days)
-    return when >= cutoff and when <= now + timedelta(hours=1)  # small clock skew tolerance
+    return when >= cutoff and when <= now + timedelta(hours=1)  # small skew tolerance
 
 def apply_recency_window(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [it for it in items if within_window(it, WINDOW_DAYS)]
+
+# ---------------------- Fallbacks ----------------------
+def fetch_fallback_rss(section: str) -> List[Dict[str, Any]]:
+    fb = SOURCES.get("fallback", {}) or {}
+    feeds = []
+    if section == "markets":
+        feeds = fb.get("markets_rss", [])
+    elif section == "companies":
+        feeds = fb.get("companies_rss", [])
+    return rank_and_dedupe(apply_recency_window(fetch_rss_list(feeds)))
+
+def fetch_finnhub_market_news() -> List[Dict[str, Any]]:
+    key = os.environ.get("FINNHUB_API_KEY")
+    if not key: return []
+    try:
+        url = f"https://finnhub.io/api/v1/news?category=general&token={key}"
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        now = datetime.now(TZ)
+        out = []
+        for n in resp.json()[:50]:
+            dt = n.get("datetime")
+            when = datetime.fromtimestamp(dt, tz=tz.tzutc()).astimezone(TZ) if dt else None
+            it = {
+                "source": n.get("source") or "Finnhub",
+                "url": n.get("url"),
+                "title": n.get("headline") or "",
+                "summary": n.get("summary") or "",
+                "published": when,
+                "type": "rss",
+            }
+            if within_window(it):
+                out.append(it)
+        return rank_and_dedupe(out)
+    except Exception:
+        return []
+
+def fetch_finnhub_company_news() -> List[Dict[str, Any]]:
+    key = os.environ.get("FINNHUB_API_KEY")
+    if not key: return []
+    tickers = SOURCES.get("fortune500_tickers", [])[:15]  # cap to keep it light
+    if not tickers: return []
+    frm = (datetime.now(TZ) - timedelta(days=WINDOW_DAYS)).date().isoformat()
+    to = datetime.now(TZ).date().isoformat()
+    out = []
+    for sym in tickers:
+        try:
+            url = f"https://finnhub.io/api/v1/company-news?symbol={sym}&from={frm}&to={to}&token={key}"
+            resp = requests.get(url, timeout=15)
+            if resp.status_code >= 400: continue
+            for n in resp.json()[:10]:
+                when = datetime.fromtimestamp(n.get("datetime", 0), tz=tz.tzutc()).astimezone(TZ) if n.get("datetime") else None
+                out.append({
+                    "source": n.get("source") or f"Finnhub {sym}",
+                    "url": n.get("url"),
+                    "title": n.get("headline") or f"{sym} update",
+                    "summary": n.get("summary") or "",
+                    "published": when,
+                    "type": "rss",
+                })
+        except Exception:
+            continue
+    out = [it for it in out if within_window(it)]
+    return rank_and_dedupe(out)
 
 # ---------------------- Summarize per-article ----------------------
 def llm_json_safe(title: str, snippet: str) -> Dict[str, str]:
@@ -269,16 +335,54 @@ def llm_json_safe(title: str, snippet: str) -> Dict[str, str]:
 def summarize_sections(collected: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, str]]]:
     # 1) Only recent items
     recent = apply_recency_window(collected)
-    # If nothing recent (edge case), just keep the newest 6 overall to avoid empty email
     if not recent:
-        recent = collected[:6]
+        recent = collected[:12]  # extreme edge case
 
     per_section = CONFIG.get("display", {}).get("per_section", 3)
-    b = bucket(recent)
-    backfill_companies(b, recent, per_section)
 
+    # 2) First pass (strict)
+    b = bucket(recent, min_rel=MIN_REL)
+    backfill_companies(b, recent, per_section, min_rel=MIN_REL)
+
+    # 3) If Markets/Companies are still empty, try relaxed relevance (min_rel - 1 down to 1)
+    relaxed_min = max(1, MIN_REL - 1)
+    if not b["markets"]:
+        b_relaxed = bucket(recent, min_rel=relaxed_min)
+        if b_relaxed["markets"]:
+            b["markets"] = b_relaxed["markets"]
+    if len(b["companies"]) < per_section:
+        backfill_companies(b, recent, per_section, min_rel=relaxed_min)
+
+    # 4) RSS fallbacks if still empty
+    if not b["markets"]:
+        b["markets"] = fetch_fallback_rss("markets")[:per_section]
+    if len(b["companies"]) < per_section:
+        need = per_section - len(b["companies"])
+        fb_comp = fetch_fallback_rss("companies")[:need]
+        b["companies"].extend(fb_comp)
+
+    # 5) Finnhub fallbacks (optional, only if API key present)
+    if not b["markets"]:
+        fin_mkt = fetch_finnhub_market_news()[:per_section]
+        if fin_mkt:
+            b["markets"] = fin_mkt
+    if len(b["companies"]) < per_section:
+        need = per_section - len(b["companies"])
+        fin_co = fetch_finnhub_company_news()[:need]
+        b["companies"].extend(fin_co)
+
+    # 6) Final: never empty — if still empty, synthesize placeholders
     results = {"macro": [], "markets": [], "companies": []}
     for sec in ["macro", "markets", "companies"]:
+        if not b[sec]:
+            b[sec] = [{
+                "title": f"No recent {sec} items detected",
+                "url": "#",
+                "summary": f"No {sec} stories passed filters within the {WINDOW_DAYS}-day window.",
+                "published": None,
+                "type": "rss",
+            }]
+
         for it in b[sec][:per_section]:
             title = it.get("title", "(no title)")
             snippet = it.get("summary", "") or title
@@ -290,14 +394,7 @@ def summarize_sections(collected: List[Dict[str, Any]]) -> Dict[str, List[Dict[s
                 "why": js["why"],
                 "published": it.get("published").strftime("%Y-%m-%d") if it.get("published") else ""
             })
-        if not results[sec]:  # never empty
-            results[sec].append({
-                "title": "No recent finance-focused items",
-                "url": "#",
-                "summary": f"No items matched the last {WINDOW_DAYS} days window.",
-                "why": "Why it matters: the brief is strict about recency; items will appear as new reports publish.",
-                "published": ""
-            })
+
     return results
 
 # ---------------------- Render & email ----------------------
@@ -313,8 +410,8 @@ def render_email(sections, sources, period_label):
     html = tpl.render(
         subject=subject,
         intro=intro,
-        week_range=period_label,    # for older templates
-        date_range=period_label,    # for your newer email.html
+        week_range=period_label,    # keep for older templates
+        date_range=period_label,    # used by your current template
         macro=sections["macro"],
         markets=sections["markets"],
         companies=sections["companies"],
@@ -328,7 +425,7 @@ def compute_period_label(period: str) -> str:
         return f"{start.isoformat()} — {end.isoformat()}"
     return today.isoformat()
 
-# ---------------------- Send (SendGrid only, per your choice) ----------------------
+# ---------------------- Send (SendGrid) ----------------------
 def send_email(subject, html):
     from sendgrid import SendGridAPIClient
     from sendgrid.helpers.mail import Mail, Email
