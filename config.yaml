@@ -10,5 +10,31 @@ email:
   reply_to: "zwalker@ucpm.com"
 
 display:
-  # Set to 2 or 3 — how many bullets to show per section
+  # 2 or 3 items per section
   per_section: 3
+
+filters:
+  # Require at least this many finance-keyword hits in title+summary
+  min_relevance: 2
+
+  # If these appear AND the item isn't clearly financial, drop it (geopolitics/conflict, etc.)
+  negative_terms:
+    - gaza
+    - palestine
+    - palestinian
+    - israel
+    - hamas
+    - middle east
+    - war
+    - conflict
+    - hostage
+    - russia
+    - ukraine
+
+  # If URL path contains these AND relevance < 3, drop it
+  drop_if_url_path_contains:
+    - /world/
+    - /middle-east/
+
+  # Leave empty to allow all, or list exact source names to keep
+  allowed_sources: []
