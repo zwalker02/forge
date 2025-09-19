@@ -8,17 +8,13 @@ on:
         required: true
         default: "preview"
         type: choice
-        options:
-          - preview
-          - send
+        options: [preview, send]
       period:
         description: "Summary period"
         required: true
         default: "week"
         type: choice
-        options:
-          - day
-          - week
+        options: [day, week]
       subject_suffix:
         description: "Optional subject suffix (e.g., '— Special Update')"
         required: false
@@ -33,43 +29,49 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - run: pip install -r requirements.txt
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
 
       - name: Set subject suffix (optional)
         if: ${{ inputs.subject_suffix != '' }}
         run: |
           python - << 'PY'
-          import yaml, os
+          import os, yaml
           p = "config.yaml"
           c = yaml.safe_load(open(p))
+          c.setdefault("email", {})
+          c["email"].setdefault("subject_prefix", "[Weekly Finance Brief]")
           suf = os.environ.get("SUBJECT_SUFFIX","").strip()
           if suf:
-              c["email"]["subject_prefix"] = c["email"]["subject_prefix"] + " " + suf
+            c["email"]["subject_prefix"] = c["email"]["subject_prefix"] + " " + suf
           open(p,"w").write(yaml.safe_dump(c, sort_keys=False))
+          print("Applied subject prefix:", c["email"]["subject_prefix"])
           PY
         env:
           SUBJECT_SUFFIX: ${{ inputs.subject_suffix }}
 
       - name: Build (preview only)
-  if: ${{ inputs.mode == 'preview' }}
-  run: |
-    python summarize.py --period ${{ inputs.period }}
-    echo "---- List out dir ----"
-    ls -la out || true
-  env:
-    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-    FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}   # optional
+        if: ${{ inputs.mode == 'preview' }}
+        run: |
+          python summarize.py --period ${{ inputs.period }}
+          echo "---- List out dir ----"
+          ls -la out || true
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
 
-- name: Upload preview artifact
-  if: ${{ inputs.mode == 'preview' }}
-  uses: actions/upload-artifact@v4
-  with:
-    name: finance-brief-preview
-    path: out/latest.html
-    if-no-files-found: error
+      - name: Upload preview artifact
+        if: ${{ inputs.mode == 'preview' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: finance-brief-preview
+          path: out/latest.html
+          if-no-files-found: error
 
       - name: Apply send_to_self override (send only)
         if: ${{ inputs.mode == 'send' && inputs.send_to_self != '' }}
@@ -79,6 +81,7 @@ jobs:
           p = "config.yaml"
           c = yaml.safe_load(open(p))
           addr = os.environ.get("SEND_TO_SELF").strip()
+          c.setdefault("recipients", {})
           c["recipients"]["to"] = [addr]
           c["recipients"]["cc"] = []
           c["recipients"]["bcc"] = []
