@@ -9,6 +9,10 @@ rss:
     url: https://www.bea.gov/rss.xml
   - name: WSJ Markets
     url: https://feeds.a.dj.com/rss/RSSMarketsMain.xml
+  - name: Reuters Company News
+    url: https://feeds.reuters.com/reuters/companyNews
+  - name: WSJ Business
+    url: https://feeds.a.dj.com/rss/RSSWorldNews.xml
 
 sec:
   current_feed: https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&output=atom
