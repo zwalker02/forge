@@ -421,9 +421,10 @@ def render_email(sections, sources, period_label):
 def compute_period_label(period: str) -> str:
     today = datetime.now(TZ).date()
     if period == "week":
-        start = today - timedelta(days=today.weekday()); end = start + timedelta(days=6)
-        return f"{start.isoformat()} — {end.isoformat()}"
-    return today.isoformat()
+        start = today - timedelta(days=today.weekday())
+        end = start + timedelta(days=6)
+        return f"{start.strftime('%B %d, %Y')} — {end.strftime('%B %d, %Y')}"
+    return today.strftime("%B %d, %Y")
 
 # ---------------------- Send (SendGrid) ----------------------
 def send_email(subject, html):
