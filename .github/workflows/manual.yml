@@ -1,8 +1,95 @@
-name: manual
+name: finance-brief-manual
+
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Choose: preview (no email) or send"
+        required: true
+        default: "preview"
+        type: choice
+        options:
+          - preview
+          - send
+      period:
+        description: "Summary period"
+        required: true
+        default: "week"
+        type: choice
+        options:
+          - day
+          - week
+      subject_suffix:
+        description: "Optional subject suffix (e.g., '— Special Update')"
+        required: false
+        type: string
+      send_to_self:
+        description: "If 'send', override recipients and email just this address (dry-run)"
+        required: false
+        type: string
+
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - run: echo hello
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+
+      - name: Set subject suffix (optional)
+        if: ${{ inputs.subject_suffix != '' }}
+        run: |
+          python - << 'PY'
+          import yaml, os
+          p = "config.yaml"
+          c = yaml.safe_load(open(p))
+          suf = os.environ.get("SUBJECT_SUFFIX","").strip()
+          if suf:
+              c["email"]["subject_prefix"] = c["email"]["subject_prefix"] + " " + suf
+          open(p,"w").write(yaml.safe_dump(c, sort_keys=False))
+          PY
+        env:
+          SUBJECT_SUFFIX: ${{ inputs.subject_suffix }}
+
+      - name: Build (preview only)
+        if: ${{ inputs.mode == 'preview' }}
+        run: python summarize.py --period ${{ inputs.period }}
+      - name: Upload preview artifact
+        if: ${{ inputs.mode == 'preview' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: finance-brief-preview
+          path: out/latest.html
+          if-no-files-found: error
+
+      - name: Apply send_to_self override (send only)
+        if: ${{ inputs.mode == 'send' && inputs.send_to_self != '' }}
+        run: |
+          python - << 'PY'
+          import yaml, os
+          p = "config.yaml"
+          c = yaml.safe_load(open(p))
+          addr = os.environ.get("SEND_TO_SELF").strip()
+          c["recipients"]["to"] = [addr]
+          c["recipients"]["cc"] = []
+          c["recipients"]["bcc"] = []
+          open(p,"w").write(yaml.safe_dump(c, sort_keys=False))
+          print("Dry-run: sending only to", addr)
+          PY
+        env:
+          SEND_TO_SELF: ${{ inputs.send_to_self }}
+
+      - name: Build & Send (email)
+        if: ${{ inputs.mode == 'send' }}
+        run: python summarize.py --period ${{ inputs.period }} --send
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
