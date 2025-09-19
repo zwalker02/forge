@@ -6,5 +6,9 @@ recipients:
 
 email:
   subject_prefix: "[Forge Financials]"
-  from_name: "Forge Financial Bot"
+  from_name: "Finance Brief Bot"
   reply_to: "zwalker@ucpm.com"
+
+display:
+  # Set to 2 or 3 — how many bullets to show per section
+  per_section: 3
