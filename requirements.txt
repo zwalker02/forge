@@ -1,1 +1,7 @@
+feedparser
 requests
+Jinja2
+PyYAML
+python-dateutil
+pytz
+sendgrid     # only needed if you’ll use SendGrid
