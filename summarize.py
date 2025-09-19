@@ -15,15 +15,18 @@ with open(os.path.join(BASE, "config.yaml"), "r", encoding="utf-8") as f:
 with open(os.path.join(BASE, "sources.yaml"), "r", encoding="utf-8") as f:
     SOURCES = yaml.safe_load(f)
 
-def _cfg(key, default=None):
-    node = CONFIG.get("filters", {})
+def _cfg(block, key, default=None):
+    node = CONFIG.get(block, {})
     return node.get(key, default) if isinstance(node, dict) else default
 
+# Window (days) for recency filtering
+WINDOW_DAYS = int(_cfg("window", "days", 7))
+
 # Filters from config
-MIN_REL = int(_cfg("min_relevance", 2))
-NEG_TERMS = [t.lower() for t in _cfg("negative_terms", [])]
-PATH_DROPS = [t.lower() for t in _cfg("drop_if_url_path_contains", [])]
-ALLOWED_SOURCES = set(_cfg("allowed_sources", []) or [])
+MIN_REL = int(_cfg("filters", "min_relevance", 2))
+NEG_TERMS = [t.lower() for t in _cfg("filters", "negative_terms", [])]
+PATH_DROPS = [t.lower() for t in _cfg("filters", "drop_if_url_path_contains", [])]
+ALLOWED_SOURCES = set(_cfg("filters", "allowed_sources", []) or [])
 
 # ---------------------- Finance keywords & regex -------------------
 FINANCE_TERMS = [
@@ -80,7 +83,6 @@ def llm_json(title: str, snippet: str, max_tokens=260) -> Dict[str, str]:
         text = resp.json()["choices"][0]["message"]["content"].strip()
         return re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.S)
 
-    # ask + parse
     text = _ask(base_user)
     data = _coerce_json_with_fallback(text, snippet)
 
@@ -126,8 +128,11 @@ def fetch_rss() -> List[Dict[str, Any]]:
         d = feedparser.parse(src["url"])
         for e in d.entries:
             when = None
+            # prefer published_parsed; some feeds only have updated_parsed
             if getattr(e, "published_parsed", None):
                 when = datetime(*e.published_parsed[:6], tzinfo=tz.tzutc()).astimezone(TZ)
+            elif getattr(e, "updated_parsed", None):
+                when = datetime(*e.updated_parsed[:6], tzinfo=tz.tzutc()).astimezone(TZ)
             items.append({
                 "source": src["name"],
                 "url": getattr(e, "link", ""),
@@ -147,6 +152,8 @@ def fetch_sec_current() -> List[Dict[str, Any]]:
         when = None
         if getattr(e, "updated_parsed", None):
             when = datetime(*e.updated_parsed[:6], tzinfo=tz.tzutc()).astimezone(TZ)
+        elif getattr(e, "published_parsed", None):
+            when = datetime(*e.published_parsed[:6], tzinfo=tz.tzutc()).astimezone(TZ)
         out.append({
             "source": "SEC EDGAR",
             "url": getattr(e, "link", ""),
@@ -236,6 +243,19 @@ def backfill_companies(b: Dict[str, list], collected: List[Dict[str, Any]], per_
             if len(b["companies"]) >= per_section:
                 break
 
+# ---------------------- Recency filter (7-day window) ----------------------
+def within_window(it: Dict[str, Any], days: int = WINDOW_DAYS) -> bool:
+    """Keep items with a real published time within the last N days (America/Phoenix)."""
+    when = it.get("published")
+    if not isinstance(when, datetime):
+        return False
+    now = datetime.now(TZ)
+    cutoff = now - timedelta(days=days)
+    return when >= cutoff and when <= now + timedelta(hours=1)  # small clock skew tolerance
+
+def apply_recency_window(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [it for it in items if within_window(it, WINDOW_DAYS)]
+
 # ---------------------- Summarize per-article ----------------------
 def llm_json_safe(title: str, snippet: str) -> Dict[str, str]:
     try:
@@ -247,9 +267,15 @@ def llm_json_safe(title: str, snippet: str) -> Dict[str, str]:
         }
 
 def summarize_sections(collected: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, str]]]:
+    # 1) Only recent items
+    recent = apply_recency_window(collected)
+    # If nothing recent (edge case), just keep the newest 6 overall to avoid empty email
+    if not recent:
+        recent = collected[:6]
+
     per_section = CONFIG.get("display", {}).get("per_section", 3)
-    b = bucket(collected)
-    backfill_companies(b, collected, per_section)
+    b = bucket(recent)
+    backfill_companies(b, recent, per_section)
 
     results = {"macro": [], "markets": [], "companies": []}
     for sec in ["macro", "markets", "companies"]:
@@ -266,10 +292,10 @@ def summarize_sections(collected: List[Dict[str, Any]]) -> Dict[str, List[Dict[s
             })
         if not results[sec]:  # never empty
             results[sec].append({
-                "title": "No finance-focused items detected",
+                "title": "No recent finance-focused items",
                 "url": "#",
-                "summary": "We filtered out non-financial stories this cycle.",
-                "why": "Why it matters: fewer finance items can occur in slow news windows; collection will resume next run.",
+                "summary": f"No items matched the last {WINDOW_DAYS} days window.",
+                "why": "Why it matters: the brief is strict about recency; items will appear as new reports publish.",
                 "published": ""
             })
     return results
@@ -287,7 +313,8 @@ def render_email(sections, sources, period_label):
     html = tpl.render(
         subject=subject,
         intro=intro,
-        week_range=period_label,
+        week_range=period_label,    # for older templates
+        date_range=period_label,    # for your newer email.html
         macro=sections["macro"],
         markets=sections["markets"],
         companies=sections["companies"],
@@ -301,41 +328,37 @@ def compute_period_label(period: str) -> str:
         return f"{start.isoformat()} — {end.isoformat()}"
     return today.isoformat()
 
+# ---------------------- Send (SendGrid only, per your choice) ----------------------
 def send_email(subject, html):
-    sg_key = os.environ.get("SENDGRID_API_KEY")
-    if sg_key:
-        from sendgrid import SendGridAPIClient
-        from sendgrid.helpers.mail import Mail, Email
-        msg = Mail(
-            from_email=(os.environ.get("SMTP_FROM") or "no-reply@example.com",
-                        CONFIG.get("email",{}).get("from_name","Finance Brief Bot")),
-            to_emails=CONFIG["recipients"]["to"],
-            subject=subject,
-            html_content=html,
-        )
-        cc = CONFIG["recipients"].get("cc", []); bcc = CONFIG["recipients"].get("bcc", [])
-        if cc: msg.cc = cc
-        if bcc: msg.bcc = bcc
-        if CONFIG.get("email",{}).get("reply_to"):
-            msg.reply_to = Email(CONFIG["email"]["reply_to"])
-        SendGridAPIClient(sg_key).send(msg); return
+    from sendgrid import SendGridAPIClient
+    from sendgrid.helpers.mail import Mail, Email
 
-    # SMTP fallback
-    import smtplib
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.text import MIMEText
-    host = os.environ.get("SMTP_HOST"); port = int(os.environ.get("SMTP_PORT","587"))
-    user = os.environ.get("SMTP_USER"); pwd = os.environ.get("SMTP_PASS")
-    from_addr = os.environ.get("SMTP_FROM") or "no-reply@example.com"
-    if not (host and user and pwd):
-        raise RuntimeError("No email transport configured. Set SENDGRID_API_KEY or SMTP_* env vars.")
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject; msg["From"] = from_addr
-    msg["To"] = ", ".join(CONFIG["recipients"]["to"])
-    if CONFIG["recipients"].get("cc"): msg["Cc"] = ", ".join(CONFIG["recipients"]["cc"])
-    msg.attach(MIMEText(html, "html", "utf-8"))
-    with smtplib.SMTP(host, port) as s:
-        s.starttls(); s.login(user, pwd); s.send_message(msg)
+    sg_key = os.environ.get("SENDGRID_API_KEY")
+    if not sg_key:
+        raise RuntimeError("Missing SENDGRID_API_KEY in environment/secrets.")
+
+    from_addr = os.environ.get("SMTP_FROM", "no-reply@example.com")
+    from_name = CONFIG.get("email", {}).get("from_name", "Finance Brief Bot")
+
+    msg = Mail(
+        from_email=(from_addr, from_name),
+        to_emails=CONFIG["recipients"]["to"],
+        subject=subject,
+        html_content=html,
+    )
+
+    cc = CONFIG["recipients"].get("cc", [])
+    bcc = CONFIG["recipients"].get("bcc", [])
+    if cc:
+        msg.cc = cc
+    if bcc:
+        msg.bcc = bcc
+
+    reply_to = CONFIG.get("email", {}).get("reply_to")
+    if reply_to:
+        msg.reply_to = Email(reply_to)
+
+    SendGridAPIClient(sg_key).send(msg)
 
 # ---------------------- Main ----------------------
 def main():
