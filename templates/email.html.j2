@@ -11,7 +11,10 @@
     h1 { font-size:22px; margin:0 0 12px; }
     h2 { font-size:18px; margin:24px 0 8px; }
     .pill { display:inline-block; padding:4px 8px; border-radius:999px; background:#eef2ff; font-size:12px; }
-    .item { margin-bottom:12px; }
+    ul { padding-left: 18px; margin: 8px 0; }
+    li { margin: 8px 0 14px; }
+    .src { font-size:12px; color:#6b7280; margin-top:4px; }
+    .src a { color:#64748b; text-decoration:none; }
     .sources a { color:#3366cc; text-decoration:none; }
     .footer { color:#6b7280; font-size:12px; margin-top:24px; }
   </style>
@@ -24,13 +27,34 @@
       <p>{{ intro }}</p>
 
       <h2>Macro</h2>
-      {% for it in macro %}<div class="item">{{ it|safe }}</div>{% endfor %}
+      <ul>
+        {% for it in macro %}
+          <li>
+            {{ it.text | safe }}
+            <div class="src"><a href="{{ it.source_url }}">{{ it.source_name }}</a></div>
+          </li>
+        {% endfor %}
+      </ul>
 
       <h2>Markets</h2>
-      {% for it in markets %}<div class="item">{{ it|safe }}</div>{% endfor %}
+      <ul>
+        {% for it in markets %}
+          <li>
+            {{ it.text | safe }}
+            <div class="src"><a href="{{ it.source_url }}">{{ it.source_name }}</a></div>
+          </li>
+        {% endfor %}
+      </ul>
 
       <h2>Companies</h2>
-      {% for it in companies %}<div class="item">{{ it|safe }}</div>{% endfor %}
+      <ul>
+        {% for it in companies %}
+          <li>
+            {{ it.text | safe }}
+            <div class="src"><a href="{{ it.source_url }}">{{ it.source_name }}</a></div>
+          </li>
+        {% endfor %}
+      </ul>
 
       <h2>Sources</h2>
       <ul class="sources">
