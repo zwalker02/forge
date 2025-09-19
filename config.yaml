@@ -3,3 +3,8 @@ recipients:
     - "Zac Walker <zwalker@ucpm.com>"
   cc: []
   bcc: []
+
+email:
+  subject_prefix: "[Weekly Finance Brief]"
+  from_name: "Finance Brief Bot"
+  reply_to: "zwalker@ucpm.com"
