@@ -5,7 +5,7 @@ with exactly these keys:
 
 {
   "summary": "Two crisp sentences summarizing the item in plain English.",
-  "why": "One to two sentences starting with 'Why it matters:' that explain the likely impact on everyday people, markets, or companies."
+  "why": "Two to three sentences starting with 'Why it matters:' that explain the likely impact on everyday people, markets, or companies."
 }
 
 Rules:
