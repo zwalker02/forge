@@ -80,15 +80,50 @@ jobs:
           import yaml, os
           p = "config.yaml"
           c = yaml.safe_load(open(p))
-          addr = os.environ.get("SEND_TO_SELF").strip()
-          c.setdefault("recipients", {})
-          c["recipients"]["to"] = [addr]
-          c["recipients"]["cc"] = []
-          c["recipients"]["bcc"] = []
-          open(p,"w").write(yaml.safe_dump(c, sort_keys=False))
-          print("Dry-run: sending only to", addr)
+          addr = os.environ.get("SEND_TO_SELF","").strip()
+          if addr:
+            c.setdefault("recipients", {})
+            c["recipients"]["to"] = [addr]
+            c["recipients"]["cc"] = []
+            c["recipients"]["bcc"] = []
+            open(p,"w").write(yaml.safe_dump(c, sort_keys=False))
+            print("Dry-run: sending only to", addr)
+          else:
+            print("No override provided; using recipients in config.yaml")
           PY
         env:
+          SEND_TO_SELF: ${{ inputs.send_to_self }}
+
+      # --- New: SendGrid smoke test so we can see 202 or the exact error ---
+      - name: SendGrid smoke test (send only)
+        if: ${{ inputs.mode == 'send' }}
+        run: |
+          python - << 'PY'
+          import os
+          to = os.environ.get("SEND_TO_SELF") or "zwalker@ucpm.com"
+          from sendgrid import SendGridAPIClient
+          from sendgrid.helpers.mail import Mail
+          key = os.environ.get("SENDGRID_API_KEY")
+          from_addr = os.environ.get("SMTP_FROM") or "no-reply@example.com"
+          if not key:
+            raise SystemExit("Missing SENDGRID_API_KEY")
+          message = Mail(
+              from_email=from_addr,
+              to_emails=[to],
+              subject="Forge smoke test",
+              html_content="<p>This is a SendGrid smoke test from GitHub Actions.</p>",
+          )
+          try:
+            sg = SendGridAPIClient(key)
+            resp = sg.send(message)
+            print("SMOKE_STATUS:", resp.status_code)
+            print("SMOKE_HEADERS:", dict(getattr(resp, "headers", {})))
+          except Exception as e:
+            raise SystemExit(f"SMOKE_FAILED: {e}")
+          PY
+        env:
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
           SEND_TO_SELF: ${{ inputs.send_to_self }}
 
       - name: Build & Send (email)
@@ -97,9 +132,5 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
